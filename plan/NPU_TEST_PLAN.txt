@@ -1,0 +1,200 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║            FlashAttention Ascend C — NPU 测试计划                          ║
+║            请按顺序执行以下步骤，并将输出结果打包发回                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+一、环境要求
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • CANN 9.0.0 已安装 (ASCEND_HOME_PATH 已设置)
+  • NPU 驱动已安装 (npu-smi 可用)
+  • cmake ≥ 3.16, g++ ≥ 11.0, python3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+二、执行步骤
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+步骤 0: 确认环境
+──────────────────────────────────────────────────────────────────────────
+
+  source /usr/local/Ascend/cann-9.0.0/set_env.sh
+  echo "ASCEND_HOME_PATH=$ASCEND_HOME_PATH"
+  npu-smi info
+  python3 -c "import torch; import torch_npu; print('NPU OK:', torch.npu.is_available())"
+
+  请将以上输出全部复制保存。
+
+步骤 1: 构建 NPU 版本
+──────────────────────────────────────────────────────────────────────────
+
+  cd flash_attention_dev
+  bash build.sh npu
+
+  预期看到:
+    [INFO] NPU 设备模式
+    [INFO] 编译中 ...
+    4 warnings generated.
+    [100%] Built target flash_attention_kernel
+
+  实际请保存完整构建日志 (包括任何警告和错误)。
+
+步骤 2: 验证编译产物
+──────────────────────────────────────────────────────────────────────────
+
+  file build/CMakeFiles/flash_attention_kernel.dir/op_kernel/flash_attention.asc.o
+
+  预期:
+    ELF 64-bit LSB relocatable, ... ARM aarch64 ... (NPU 目标架构)
+
+  如果显示 x86-64 说明编译成了 CPU 仿真模式，请检查 build.sh 参数。
+
+步骤 3: 生成 Tiling 数据
+──────────────────────────────────────────────────────────────────────────
+
+  # 标准配置 (GQA 32头/8KV头, 2048序列, 128隐藏维)
+  python3 tools/gen_tiling.py --out tiling_data.bin --verify
+
+  # 小规模测试 (4头/1KV头, 256序列, 64维)
+  python3 tools/gen_tiling.py --heads-q 4 --heads-kv 1 \
+    --seq-q 256 --seq-k 256 --dim 64 --out tiling_small.bin --verify
+
+  保存输出。
+
+步骤 4: 运行参考测试 (无需 NPU)
+──────────────────────────────────────────────────────────────────────────
+
+  python3 test_ref.py --heads-q 32 --heads-kv 8 --seq-q 2048 --seq-k 2048 --dim 128
+  python3 test_ref.py --heads-q 4  --heads-kv 1 --seq-q 256   --seq-k 256   --dim 64
+
+  保存输出。如果有 GPU 可加 --profile。
+
+步骤 5: ⭐ 端到端 NPU 核函数测试
+──────────────────────────────────────────────────────────────────────────
+
+  python3 test_npu.py --heads-q 4 --heads-kv 1 --seq-q 256 --seq-k 256 --dim 64
+
+  这个脚本会:
+    1. 生成随机输入数据 (Q, K, V)
+    2. 生成 tiling 数据 (tiling buffer)
+    3. 调用 核函数 在 NPU 上运行
+    4. 运行参考实现得到预期输出
+    5. 对比核函数输出与参考输出
+    6. 输出数值误差统计和性能数据
+
+  请完整保存脚本输出。
+
+步骤 6: 多配置测试
+──────────────────────────────────────────────────────────────────────────
+
+  # 请逐个运行:
+  python3 test_npu.py --heads-q 8  --heads-kv 2  --seq-q 512  --seq-k 512  --dim 64
+  python3 test_npu.py --heads-q 16 --heads-kv 4  --seq-q 1024 --seq-k 1024 --dim 128
+  python3 test_npu.py --heads-q 32 --heads-kv 8  --seq-q 2048 --seq-k 2048 --dim 128
+  python3 test_npu.py --heads-q 32 --heads-kv 32 --seq-q 2048 --seq-k 2048 --dim 128  # MHA (no GQA)
+  python3 test_npu.py --heads-q 32 --heads-kv 8  --seq-q 8192 --seq-k 8192 --dim 128  # 长序列
+  python3 test_npu.py --heads-q 8  --heads-kv 8  --seq-q 512  --seq-k 2048 --dim 128  # 交叉注意力 (prefill)
+
+  每个测试请保存完整输出。如果有失败的，请标记。
+
+步骤 7: 性能 Benchmark (可选，如果步骤6通过)
+──────────────────────────────────────────────────────────────────────────
+
+  python3 bench_npu.py --heads-q 32 --heads-kv 8 --seq-q 2048 --seq-k 2048 --dim 128
+
+  保存输出。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+三、需要发回的文件清单
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  请将以下所有内容打包发回:
+
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ 1. 步骤0~步骤7 的完整终端输出日志 (建议用 script 命令记录)           │
+  │    script npu_test.log                                              │
+  │    ... 执行所有步骤 ...                                              │
+  │    exit                                                             │
+  │                                                                     │
+  │ 2. 构建输出目录 (如果出错):                                          │
+  │    tar czf build_logs.tar.gz flash_attention_dev/build/              │
+  │                                                                     │
+  │ 3. tiling 数据文件 (验证生成是否正确):                                │
+  │    flash_attention_dev/tiling_data.bin                               │
+  │    flash_attention_dev/tiling_small.bin                              │
+  │                                                                     │
+  │ 4. NPU 信息 (用于架构兼容性检查):                                     │
+  │    npu-smi info -t board -i 0                                       │
+  └──────────────────────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+四、测试结果能诊断的问题
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  问题分类             观察现象                          可能原因
+  ─────────────────────────────────────────────────────────────────────────
+  🔴 编译失败          构建报错，.o 未生成                CANN 版本不匹配
+                                                         头文件路径问题
+                                                         宏定义兼容性
+
+  🔴 加载崩溃          NPU 驱动报错 / 进程 killed         TCubeTiling 不正确
+                         (核函数无法加载)                 REGIST_MATMUL_OBJ 不兼容
+
+  🔴 运行崩溃          Python 进程 segfault               UB 缓冲区溢出
+                         (无错误信息直接退出)              Workspace 不足
+
+  🟠 数值完全错误      cos_sim < 0.9                     数学 Bug (mNew 读取等)
+                         max_diff > 0.5                   Tiling 数据错误
+                                                        Matmul 配置错误
+
+  🟠 精度略差          cos_sim ≈ 0.99                    fp16 累积误差
+                         max_diff ≈ 0.1-0.5              online softmax 精度
+
+  🟡 性能异常          比预期慢 2x+                       Matmul 使用 GlobalTensor
+                         (benchmark 对比)                 而非 LocalTensor (VECIN)
+
+  🟡 某配置失败        小规模通过，大规模崩溃              缓冲区随规模非线性增长
+                         8K 序列失败                       UB 不足
+                                                        Workspace 不足
+
+  🟡 非 causal 失败    有 causal 时正确                    causal mask 向量化逻辑
+                         无 causal 时报错                  与 bmm2 交互问题
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+五、快速问题定位表
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  遇到问题 → 立即执行以下命令，发回输出:
+
+  问题: 编译失败
+    → cat build/CMakeFiles/CMakeOutput.log
+    → cmake --build build VERBOSE=1 2>&1 | tail -50
+
+  问题: 运行时崩溃
+    → dmesg | tail -20
+    → /var/log/npu/slog/device-0/ 下的日志
+    → export ASCEND_SLOG_PRINT_TO_STDOUT=1 && python3 test_npu.py ...
+
+  问题: 精度不对
+    → python3 -c "
+  import numpy as np
+  ref = np.fromfile('ref_out.bin', np.float16)
+  out = np.fromfile('npu_out.bin', np.float16)
+  print('cos_sim:', np.dot(ref, out) / (np.linalg.norm(ref)*np.linalg.norm(out)))
+  print('max_diff:', np.max(np.abs(ref.astype(np.float32)-out.astype(np.float32))))
+  print('mean_diff:', np.mean(np.abs(ref.astype(np.float32)-out.astype(np.float32))))
+  "
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+六、预期输出基准 (参考值)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  以下是在 CPU 仿真模式下验证通过的参考值:
+
+  配置                       输出范围             均值
+  ─────────────────────────────────────────────────────
+  B=1 Hq=8  Hkv=2  Sq=512  D=64  [-2.63,  2.30]  0.005
+  B=1 Hq=32 Hkv=8  Sq=2048 D=128 [-3.13,  3.26]  0.001
+  B=1 Hq=4  Hkv=1  Sq=256  D=64  [-2.21,  1.97]  0.011
+
+  你的 NPU 输出应该与这些范围一致 (差异 < 5%)。

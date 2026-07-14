@@ -1,0 +1,9 @@
+build/
+__pycache__/
+*.pyc
+*.o
+*.so
+*.bin
+msprof_*/
+profiling/
+.DS_Store
